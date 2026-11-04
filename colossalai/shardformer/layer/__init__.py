@@ -2,6 +2,7 @@ from ._operation import all_to_all_comm
 from .attn import AttnMaskType, ColoAttention, RingAttention, get_pad_info
 from .dropout import DropoutForParallelInput, DropoutForReplicatedInput
 from .embedding import Embedding1D, PaddingEmbedding, VocabParallelEmbedding1D
+from .gated_delta_net import FusedGatedDeltaNet, fused_gated_delta_rule
 from .linear import Linear1D_Col, Linear1D_Row, LinearWithGradAccum, PaddingLMHead, VocabParallelLMHead1D
 from .loss import cross_entropy_1d, dist_cross_entropy, dist_log_prob, dist_log_prob_1d
 from .normalization import FusedLayerNorm, FusedRMSNorm, LayerNorm, RMSNorm
@@ -16,6 +17,8 @@ from .qkv_fused_linear import (
 )
 
 __all__ = [
+    "FusedGatedDeltaNet",
+    "fused_gated_delta_rule",
     "Embedding1D",
     "VocabParallelEmbedding1D",
     "LinearWithGradAccum",

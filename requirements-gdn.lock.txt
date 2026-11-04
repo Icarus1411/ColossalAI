@@ -1,0 +1,4 @@
+# Optional Gated DeltaNet kernels. Install into the existing HF5 environment
+# with --no-deps --require-hashes; this is not a complete environment lock.
+flash-linear-attention==0.6.0 --hash=sha256:6dec9735f8454523c13553622e98aff30152dde6586b4ac7d88010fbb7a06b5f
+fla-core==0.6.0 --hash=sha256:b0708b70e0b119cd58a0a5146ea56cb175cef6ed969d8ac60267e3e077ce3ebd
