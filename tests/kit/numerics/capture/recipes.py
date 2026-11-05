@@ -24,6 +24,7 @@ class Recipe:
         loss_scale: Fixed factor the loss is multiplied by before backward; gradients are divided by it afterwards.
         optimizer_device: Where the master weights and the optimizer live (``"cpu"`` for offloading plugins); ``None``
             keeps them on the accelerator. Only meaningful with ``master_weights``.
+        master_from_fp32: Preserve original FP32 weights for FSDP master weights.
         source: Where the plugin does this, so that a change on its side can be traced back here.
     """
 
@@ -33,6 +34,7 @@ class Recipe:
     loss_scale: Optional[float] = None
     optimizer_device: Optional[str] = None
     source: str = ""
+    master_from_fp32: bool = False
 
 
 FLOAT64 = Recipe(torch.float64, source="float64 ground truth")
@@ -158,6 +160,7 @@ def recipe_for(plugin: Plugin, mixed_precision: Union[str, MixedPrecision, None]
         return Recipe(
             dtype,
             master_weights=True,
+            master_from_fp32=True,
             source="FSDP MixedPrecision: sharded float32 parameters cast to param_dtype for forward and backward, "
             "root forward casts floating inputs, gradients cast back to float32 for the optimizer; "
             "torch_fsdp_plugin.py applies no loss scaling",

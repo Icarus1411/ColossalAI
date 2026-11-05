@@ -34,12 +34,13 @@ def _load_fla_kernel():
     return chunk_gated_delta_rule
 
 
-def fused_gated_delta_rule(q, k, v, g, beta):
+def fused_gated_delta_rule(q, k, v, g, beta, *, align_bf16_blocks=False):
     """Return [batch, time, heads, value_dim] with differentiable FLA chunk kernels.
 
     Q/K/V use FP32, BF16 or FP16 on CUDA; gates are accumulated in FP32. Q/K are
     L2-normalized inside FLA. No native fallback or inference-only recurrent
-    dispatch is allowed, including for a one-token training sequence.
+    dispatch is allowed, including for a one-token training sequence. The Qwen
+    policy enables align_bf16_blocks only for BF16 inputs promoted to FP32.
     """
     if q.device.type != "cuda" or q.dtype not in (torch.float32, torch.bfloat16, torch.float16):
         raise ValueError("FLA training requires CUDA FP32/BF16/FP16 Q/K/V")
@@ -53,6 +54,8 @@ def fused_gated_delta_rule(q, k, v, g, beta):
         raise ValueError("Expected Q/K [B,T,H,K] and V [B,T,H,V]; expand grouped Q/K heads first")
     if q.shape[1] == 0 or g.shape != q.shape[:3] or beta.shape != q.shape[:3]:
         raise ValueError("Expected a nonempty sequence and g/beta [B,T,H]")
+    if align_bf16_blocks and q.dtype != torch.float32:
+        raise ValueError("BF16-aligned blocks require Q/K/V promoted to FP32")
     # This training API always starts from a zero recurrent state. Its first
     # decay multiplies zero, so neither the output nor its gradient depends on
     # g[:, 0]. Remove that redundant dependency before the chunk cumsum to avoid
@@ -62,7 +65,7 @@ def fused_gated_delta_rule(q, k, v, g, beta):
     if q.dtype == torch.float32:
         from ._gated_delta_net_fp32 import stable_gated_delta_rule
 
-        return stable_gated_delta_rule(q, k, v, g.float(), beta)
+        return stable_gated_delta_rule(q, k, v, g.float(), beta, align_bf16_blocks)
     output, _ = kernel(
         q=q, k=k, v=v, g=g.float(), beta=beta,
         use_qk_l2norm_in_kernel=True, output_final_state=False,
@@ -80,7 +83,7 @@ class FusedGatedDeltaNet(ParallelModule):
     """
 
     @staticmethod
-    def from_native_module(module, process_group=None, **kwargs):
+    def from_native_module(module, process_group=None, force_fp32_core=False, **kwargs):
         if kwargs:
             raise TypeError(f"Unsupported GDN replacement options: {sorted(kwargs)}")
         groups = process_group if isinstance(process_group, (tuple, list)) else [process_group]
@@ -94,6 +97,7 @@ class FusedGatedDeltaNet(ParallelModule):
             raise ValueError("Expected a depthwise stride-one, dilation-one convolution")
         _load_fla_kernel()
         result = FusedGatedDeltaNet()
+        result.force_fp32_core = force_fp32_core
         for name in (
             "hidden_size", "num_v_heads", "num_k_heads", "head_k_dim", "head_v_dim",
             "key_dim", "value_dim", "conv_kernel_size", "conv_dim", "layer_idx",
@@ -116,6 +120,11 @@ class FusedGatedDeltaNet(ParallelModule):
                 raise ValueError("GDN attention_mask must have shape [batch, sequence]")
             hidden_states = (hidden_states * attention_mask.unsqueeze(-1)).to(hidden_states.dtype)
         mixed = self.in_proj_qkv(hidden_states).transpose(1, 2)
+        # Preserve HF projection order: autograd accumulates their BF16 input
+        # gradients in graph order, and BF16 addition is not associative.
+        z = self.in_proj_z(hidden_states).reshape(-1, self.head_v_dim)
+        b = self.in_proj_b(hidden_states)
+        a = self.in_proj_a(hidden_states)
         mixed = F.silu(F.conv1d(
             mixed, self.conv1d.weight, self.conv1d.bias,
             padding=self.conv_kernel_size - 1, groups=self.conv_dim,
@@ -127,9 +136,17 @@ class FusedGatedDeltaNet(ParallelModule):
         repeats = self.num_v_heads // self.num_k_heads
         if repeats > 1:
             q, k = q.repeat_interleave(repeats, dim=2), k.repeat_interleave(repeats, dim=2)
-        beta = self.in_proj_b(hidden_states).sigmoid()
-        g = -self.A_log.float().exp() * F.softplus(self.in_proj_a(hidden_states).float() + self.dt_bias)
-        output = fused_gated_delta_rule(q, k, v, g, beta)
-        z = self.in_proj_z(hidden_states).reshape(-1, self.head_v_dim)
+        beta = b.sigmoid()
+        g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+        if self.force_fp32_core:
+            # HF Qwen3.5's native core promotes Q/K/V and beta before L2
+            # normalization and the recurrence. Match that precision recipe;
+            # projections, convolution and the returned activations stay in
+            # the model's dtype. The actual core is still fused Triton/FLA.
+            output = fused_gated_delta_rule(
+                q.float(), k.float(), v.float(), g, beta.float(), align_bf16_blocks=q.dtype == torch.bfloat16,
+            ).to(q.dtype)
+        else:
+            output = fused_gated_delta_rule(q, k, v, g, beta)
         output = self.norm(output.reshape(-1, self.head_v_dim), z)
         return self.out_proj(output.reshape(batch, length, self.value_dim))

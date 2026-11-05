@@ -26,6 +26,12 @@ class PolicyLocation:
 # as each policy file imports its own model zoo library
 # we will allow the user to only import the policy file needed
 _POLICY_LIST = {
+    # Qwen3.5 dense (data parallel training)
+    "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5TextModel": PolicyLocation(file_name="qwen3_5", class_name="Qwen3_5Policy"),
+    "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5Model": PolicyLocation(file_name="qwen3_5", class_name="Qwen3_5Policy"),
+    "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5ForCausalLM": PolicyLocation(file_name="qwen3_5", class_name="Qwen3_5ForCausalLMPolicy"),
+    "transformers.models.qwen3_5.modeling_qwen3_5.Qwen3_5ForConditionalGeneration": PolicyLocation(file_name="qwen3_5", class_name="Qwen3_5ForConditionalGenerationPolicy"),
+
     # BERT
     "transformers.models.bert.modeling_bert.BertModel": PolicyLocation(file_name="bert", class_name="BertModelPolicy"),
     "transformers.models.bert.modeling_bert.BertForPreTraining": PolicyLocation(

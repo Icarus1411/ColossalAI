@@ -14,6 +14,7 @@ from .mixtral import *
 from .opt import *
 from .qwen2 import *
 from .qwen3 import *
+from .qwen3_5 import *
 from .sam import *
 from .t5 import *
 from .vit import *

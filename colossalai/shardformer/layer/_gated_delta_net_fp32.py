@@ -22,8 +22,8 @@
 
 """Stable FP32 backward for the pinned FLA 0.6.0 GDN training API.
 
-Only the gate derivative formula differs from FLA. Native FLA forward, state
-updates, WY backward and normalization kernels are reused without modifying
+The local adapter scales normalized Q before the dot products and uses a stable
+gate derivative. It reuses FLA forward, state, WY and normalization kernels without modifying
 FLA globals. This private adapter supports zero initial state, expanded heads,
 no cache/packed sequences and chunk size 16, as used by FusedGatedDeltaNet.
 """
@@ -271,17 +271,22 @@ class _StableGatedDeltaRule(torch.autograd.Function):
     @staticmethod
     @input_guard
     @autocast_custom_fwd
-    def forward(ctx, q, k, v, g, beta):
+    def forward(ctx, q, k, v, g, beta, align_bf16_blocks):
         # Version and precision guards live in the shared layer's public entry.
         q, q_rstd = _fla.l2norm_fwd(q)
         k, k_rstd = _fla.l2norm_fwd(k)
         scale = q.shape[-1] ** -0.5
-        g, out, a, _, _, _ = _fla.chunk_gated_delta_rule_fwd(
-            q=q, k=k, v=v, g=g, beta=beta, scale=scale,
-            initial_state=None, output_final_state=False, chunk_size=16,
-        )
+        if align_bf16_blocks:
+            from ._gated_delta_net_bf16 import aligned_block_forward
+
+            g, out, a = aligned_block_forward(q * scale, k, v, g, beta, block_size=16)
+        else:
+            g, out, a, _, _, _ = _fla.chunk_gated_delta_rule_fwd(
+                q=q * scale, k=k, v=v, g=g, beta=beta, scale=1.0,
+                initial_state=None, output_final_state=False, chunk_size=16,
+            )
         ctx.save_for_backward(q, q_rstd, k, k_rstd, v, g, beta, a)
-        ctx.scale = scale
+        ctx.query_scale = scale
         return out.to(q.dtype)
 
     @staticmethod
@@ -289,32 +294,36 @@ class _StableGatedDeltaRule(torch.autograd.Function):
     @autocast_custom_bwd
     def backward(ctx, do):
         q, q_rstd, k, k_rstd, v, g, beta, a = ctx.saved_tensors
-        scale = ctx.scale
-        # Native FLA 0.6.0 backward, restricted to this training API. Only the
-        # dq/ dk/ dw/ dg launch below uses our stable algebraic gate derivative.
+        normalized_q = q
+        q = normalized_q * ctx.query_scale
+        # Use the pre-scaled query in the FLA backward and the stable gate derivative.
+        # Rematerialize the WY factors from the saved triangular inverse, as in FLA.
         w, u = _fla.recompute_w_u_fwd(k=k, v=v, beta=beta, A=a, g=g)
         h, v_new, _ = _fla.chunk_gated_delta_rule_fwd_h(
             k=k, w=w, u=u, g=g, initial_state=None,
             output_final_state=False, chunk_size=16,
         )
-        dv = _fla.chunk_bwd_dv_local(q=q, k=k, g=g, do=do, scale=scale, chunk_size=16)
+        dv = _fla.chunk_bwd_dv_local(q=q, k=k, g=g, do=do, scale=1.0, chunk_size=16)
         dh, _, dv = _fla.chunk_gated_delta_rule_bwd_dhu(
             q=q, k=k, w=w, g=g, h0=None, dht=None, do=do, dv=dv,
-            scale=scale, chunk_size=16,
+            scale=1.0, chunk_size=16,
         )
         dq, dk, dw, dg = stable_chunk_bwd_dqkwg(
             q=q, k=k, v=v_new, w=w, g=g, h=h, dv=dv, do=do, dh=dh,
-            scale=scale, chunk_size=16,
+            scale=1.0, chunk_size=16,
         )
         dk2, dv, db, dg2 = _fla.prepare_wy_repr_bwd(k=k, v=v, beta=beta, g=g, A=a, dw=dw, du=dv)
-        dk.add_(dk2)
-        dg.add_(dg2)
+        # ColoTensor (Gemini) rewrites in-place operations as out-of-place.
+        # Retain the returned tensors or the WY gradient contribution is lost.
+        dk = dk + dk2
+        dg = dg + dg2
         dg = _fla.chunk_local_cumsum(dg, chunk_size=16, reverse=True)
-        dq = _fla.l2norm_bwd(q, q_rstd, dq)
+        # Propagate through the pre-dot scaling, then through normalization.
+        dq = _fla.l2norm_bwd(normalized_q, q_rstd, dq * ctx.query_scale)
         dk = _fla.l2norm_bwd(k, k_rstd, dk)
-        return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta)
+        return dq.to(q), dk.to(k), dv.to(v), dg.to(g), db.to(beta), None
 
 
-def stable_gated_delta_rule(q, k, v, g, beta):
+def stable_gated_delta_rule(q, k, v, g, beta, align_bf16_blocks=False):
     """FP32 path; called lazily after the shared layer validates FLA 0.6.0."""
-    return _StableGatedDeltaRule.apply(q, k, v, g, beta)
+    return _StableGatedDeltaRule.apply(q, k, v, g, beta, align_bf16_blocks)

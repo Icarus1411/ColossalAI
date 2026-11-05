@@ -759,6 +759,24 @@ class LowLevelZeroOptimizer(OptimizerWrapper):
 
         return {"state": packed_state, "param_groups": param_groups}
 
+    def _checkpoint_param_state(self, param, state):
+        # BF16/FP16 model checkpoints cannot reconstruct the low bits of the
+        # FP32 optimizer weights. Store these with each parameter's optimizer
+        # state so both sharded and unsharded checkpoint paths preserve them.
+        state = dict(state)
+        if self._master_weights and self._dtype in (torch.float16, torch.bfloat16):
+            state["_colossalai_master_param"] = param.detach()
+        return state
+
+    @torch.no_grad()
+    def _restore_master_weights(self, states=None):
+        # Older checkpoints have no master weights and retain their existing
+        # model-derived initialization. Never expose this key to the optimizer.
+        for param, state in (self.optim.state if states is None else states).items():
+            master = state.pop("_colossalai_master_param", None)
+            if master is not None:
+                param.copy_(master)
+
     def state_dict(
         self, pinned_state_dicts: Optional[Dict[str, Dict[str, torch.Tensor]]] = None, only_on_master: bool = False
     ) -> Dict:
@@ -771,9 +789,7 @@ class LowLevelZeroOptimizer(OptimizerWrapper):
         device = get_accelerator().get_current_device()
         for param_group in self.optim.param_groups:
             for param in param_group["params"]:
-                if param not in self.optim.state:
-                    continue
-                state = self.optim.state[param]
+                state = self._checkpoint_param_state(param, self.optim.state.get(param, {}))
                 working_param = self.master_to_working_param[id(param)]
                 pg = self.param_to_pg[working_param]
                 if not only_on_master or get_nd_rank(pg) == 0:
@@ -831,6 +847,7 @@ class LowLevelZeroOptimizer(OptimizerWrapper):
                         v_list = v.split(v.numel() // world_size)
                         zero_state_dict["state"][param_idx][k] = v_list[rank].detach().clone()
 
+        self._restore_master_weights({idx2master[idx]: state for idx, state in zero_state_dict["state"].items()})
         self.optim.load_state_dict(zero_state_dict)
 
     def state_dict_shard(
@@ -864,7 +881,7 @@ class LowLevelZeroOptimizer(OptimizerWrapper):
         for param_group in self.optim.param_groups:
             for master_param in param_group["params"]:
                 param_idx = master2idx[master_param]
-                states = local_states[param_idx]
+                states = self._checkpoint_param_state(master_param, local_states.get(param_idx, {}))
 
                 current_block_size = 0
                 if pinned_state_dicts is not None and param_idx not in pinned_state_dicts:
@@ -974,6 +991,9 @@ class LowLevelZeroOptimizer(OptimizerWrapper):
         return self._padding_map
 
     def get_param_grad(self, working_param: nn.Parameter) -> Tensor:
+        # Frozen parameters (e.g. a text-only model vision tower) have no gradient store.
+        if not working_param.requires_grad:
+            return None
         grad_store = self.pid_to_grad_store[id(working_param)]
         grad = grad_store.get_working_grad_by_param_id(id(working_param))
         if grad is None:

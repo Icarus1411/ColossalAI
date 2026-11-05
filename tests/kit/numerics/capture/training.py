@@ -124,11 +124,16 @@ def run_reference(
     """
     device = get_accelerator().get_current_device()
     module = copy.deepcopy(s.reference)
+    initial_master = None
+    if recipe.master_weights and recipe.master_from_fp32:
+        initial_master = [p.detach().float().clone() for p in module.parameters()]
     if not recipe.autocast:
         module.to(recipe.dtype)
     named = list(module.named_parameters())
     if recipe.master_weights:
-        master = [nn.Parameter(p.detach().float().to(recipe.optimizer_device or p.device)) for _, p in named]
+        master_values = initial_master if initial_master is not None else [p.detach().float() for _, p in named]
+        master = [nn.Parameter(value.to(recipe.optimizer_device or p.device))
+                  for value, (_, p) in zip(master_values, named)]
         optimizer = optimizer_fn(master)
     else:
         optimizer = optimizer_fn([p for _, p in named])
@@ -482,7 +487,7 @@ def _meta(s: Prepared, grad_seed: int, meta: Dict[str, Any]) -> Dict[str, Any]:
 def _describe(recipe: Recipe) -> str:
     parts = [str(recipe.dtype).replace("torch.", ""), "autocast" if recipe.autocast else "cast"]
     if recipe.master_weights:
-        parts.append("float32 master weights")
+        parts.append("float32 master weights" + (" from original FP32 weights" if recipe.master_from_fp32 else ""))
     if recipe.loss_scale:
         parts.append(f"loss scale {recipe.loss_scale:g}")
     return ", ".join(parts)
@@ -502,14 +507,15 @@ def _rename(name: str, param_map) -> Optional[str]:
 
 
 def _first_step(outputs, inputs, grads, param_map) -> Dict[str, Tensor]:
-    results = {key: out.detach() for key, out in outputs.items()}
+    # Store immutable trace snapshots on CPU while the optimizer and later steps run.
+    results = {key: out.detach().to("cpu", copy=True) for key, out in outputs.items()}
     for key, value in inputs.items():
         if isinstance(value, Tensor) and value.grad is not None:
-            results[f"grad/{key}"] = value.grad.detach().clone()
+            results[f"grad/{key}"] = value.grad.detach().to("cpu", copy=True)
     for name, grad in grads.items():
         name = _rename(name, param_map)
         if name is not None and grad is not None:
-            results[f"grad/param/{name}"] = grad.detach().clone()
+            results[f"grad/param/{name}"] = grad.detach().to("cpu", copy=True)
     return results
 
 
@@ -528,7 +534,7 @@ def _params(named, param_map) -> Dict[str, Tensor]:
     for name, p in named:
         name = _rename(name, param_map)
         if name is not None:
-            results[f"param/{name}"] = p.detach().clone()
+            results[f"param/{name}"] = p.detach().to("cpu", copy=True)
     return results
 
 

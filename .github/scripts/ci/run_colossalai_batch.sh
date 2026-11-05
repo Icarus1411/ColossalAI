@@ -179,6 +179,8 @@ case "${BATCH}" in
             tests/test_booster/test_plugin/test_torch_ddp_plugin.py
             tests/test_booster/test_plugin/test_torch_fsdp_plugin.py
             tests/test_booster/test_plugin/test_low_level_zero_plugin.py
+            tests/test_booster/test_plugin/test_precision_checkpoint_regressions.py
+            tests/test_shardformer/test_model/test_shard_qwen3_5.py
             tests/test_lora/test_lora.py
             tests/test_numerics
         )

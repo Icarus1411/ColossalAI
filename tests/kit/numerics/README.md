@@ -233,7 +233,7 @@ A comparison is only meaningful if `ref` reduces precision exactly where the plu
    | `GeminiPlugin(precision="bf16")` | whole model and inputs cast to bf16, float32 master weights | CUDA |
    | `GeminiPlugin(precision="fp16")` | whole model and inputs cast to fp16, float32 master weights, loss scale `initial_scale` (2**16) | CUDA |
    | `TorchFSDPPlugin()` | float32 | CUDA |
-   | `TorchFSDPPlugin(mixed_precision=MixedPrecision(param_dtype=bf16 or fp16, buffer_dtype=the same))` | whole model and inputs cast, float32 master weights (FSDP's sharded parameters), no loss scaling | CUDA |
+   | `TorchFSDPPlugin(mixed_precision=MixedPrecision(param_dtype=bf16 or fp16, buffer_dtype=the same))` | whole model and inputs cast, original float32 master weights, preserved before the compute cast (FSDP's sharded parameters), no loss scaling | CUDA |
    | `LowLevelZeroPlugin` with fp16, `max_norm`, `use_fp8`, `cast_inputs=False`, or `cpu_offload` with fp32 or `master_weights=False`; `HybridParallelPlugin` with any parallel size above 1, sequence parallelism, `zero_stage > 0`, `max_norm`, `use_fp8`, `cpu_offload` or fp16; `GeminiPlugin` with offloading (`placement_policy="auto"`, `offload_*_frac`), `max_norm`, `use_fp8`, `master_weights=False`, `tp_size` or `extra_dp_size` above 1; `TorchFSDPPlugin` with `cpu_offload`, `auto_wrap_policy`, `ignored_modules`, `fp8_communication`, a `buffer_dtype` other than `param_dtype` or `keep_low_precision_grads`; other plugins | refused: not verified yet | |
 
 2. **The dtypes actually used must match.** Both runs record the input, output and weight dtypes of every module,
@@ -454,6 +454,25 @@ Two more, which `resume` reports as failures:
 - `TorchFSDPPlugin`: a sharded model checkpoint has no `config.json`, so `from_pretrained` falls back to a default
   config and fails on the shapes. `save_config_file` is given `model.unwrap()`, which is the FSDP wrapper, not the
   HuggingFace model, and returns without writing.
+
+### Corrections verified during Qwen3.5 integration (2026-11-05)
+
+The plugin limitations above record the original baseline. The current personal branch includes these fixes:
+
+- LowLevelZero and Gemini optimizer checkpoints carry FP32 master weights in the optional per-parameter
+  `_colossalai_master_param` field. Their loaders consume that field before optimizer use; legacy checkpoints still
+  load, but cannot recover precision that was never saved. Loading only the model is not an exact training resume.
+- Gemini recognizes tied-parameter aliases during strict loading and forwards `remove_duplicate` in
+  `named_parameters`. Gathered gradient accumulation no longer multiplies a replicated gradient by the world size
+  before all-reduce. The gathered and sharded chunk layouts both pass two-rank accumulation and resume regressions.
+- FSDP saves the underlying HuggingFace model configuration, so the model can reload with `from_pretrained`.
+- The FSDP reference recipe now keeps the original FP32 master values before casting the working model. ZeRO and
+  Gemini still initialize their masters from the cast working weights. This corrects an implementation mismatch;
+  the FP64 truth and numerical judging thresholds are unchanged.
+
+The earlier HybridParallel BF16 resume limitation and the unrelated CPU/double-wrapper loading limitations have
+not been fixed by this change. Model-specific numerical failures must still be judged from their reports.
+See `docs/QWEN3_5-TRAINING-zh.md` and `logs/gpu-h20-5/20261104-175044-2B3/` for the model evidence.
 
 ## Calibrating the multiplier
 
