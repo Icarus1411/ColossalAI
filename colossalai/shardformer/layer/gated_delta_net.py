@@ -34,13 +34,14 @@ def _load_fla_kernel():
     return chunk_gated_delta_rule
 
 
-def fused_gated_delta_rule(q, k, v, g, beta, *, align_bf16_blocks=False):
-    """Return [batch, time, heads, value_dim] with differentiable FLA chunk kernels.
+def fused_gated_delta_rule(q, k, v, g, beta, *, align_bf16_blocks=False, align_fp16_blocks=False):
+    """Return [batch, time, heads, value_dim] with differentiable CUDA chunk kernels.
 
     Q/K/V use FP32, BF16 or FP16 on CUDA; gates are accumulated in FP32. Q/K are
-    L2-normalized inside FLA. No native fallback or inference-only recurrent
+    L2-normalized inside the core. No native fallback or inference-only recurrent
     dispatch is allowed, including for a one-token training sequence. The Qwen
-    policy enables align_bf16_blocks only for BF16 inputs promoted to FP32.
+    policy uses align_bf16_blocks on promoted BF16, and align_fp16_blocks
+    on FP16 inputs to preserve AMP rounding within the chunk.
     """
     if q.device.type != "cuda" or q.dtype not in (torch.float32, torch.bfloat16, torch.float16):
         raise ValueError("FLA training requires CUDA FP32/BF16/FP16 Q/K/V")
@@ -56,6 +57,16 @@ def fused_gated_delta_rule(q, k, v, g, beta, *, align_bf16_blocks=False):
         raise ValueError("Expected a nonempty sequence and g/beta [B,T,H]")
     if align_bf16_blocks and q.dtype != torch.float32:
         raise ValueError("BF16-aligned blocks require Q/K/V promoted to FP32")
+    if align_fp16_blocks:
+        if q.dtype != torch.float16:
+            raise ValueError("FP16-aligned blocks require FP16 Q/K/V")
+        from ._gated_delta_net_fp16 import qwen_fp16_gated_delta_rule
+
+        _load_fla_kernel()
+        # Keep the first gate's value for prefix rounding. A zero initial
+        # state makes its derivative identically zero.
+        g = torch.cat((g[:, :1].detach(), g[:, 1:]), dim=1)
+        return qwen_fp16_gated_delta_rule(q, k, v, g, beta)
     # This training API always starts from a zero recurrent state. Its first
     # decay multiplies zero, so neither the output nor its gradient depends on
     # g[:, 0]. Remove that redundant dependency before the chunk cumsum to avoid
@@ -138,7 +149,9 @@ class FusedGatedDeltaNet(ParallelModule):
             q, k = q.repeat_interleave(repeats, dim=2), k.repeat_interleave(repeats, dim=2)
         beta = b.sigmoid()
         g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
-        if self.force_fp32_core:
+        if self.force_fp32_core and q.dtype == torch.float16:
+            output = fused_gated_delta_rule(q, k, v, g, beta, align_fp16_blocks=True)
+        elif self.force_fp32_core:
             # HF Qwen3.5's native core promotes Q/K/V and beta before L2
             # normalization and the recurrence. Match that precision recipe;
             # projections, convolution and the returned activations stay in

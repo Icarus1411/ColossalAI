@@ -135,3 +135,24 @@ def test_promoted_bf16_blocks_against_fp64(length, dim):
     for x, target in zip(actual, expected):
         torch.testing.assert_close(x.double(), target, rtol=3e-5, atol=1e-5)
     assert torch.count_nonzero(actual[4][:, 0]) == 0
+
+
+def _check_fp16_training(rank, world_size, port, backend):
+    import colossalai
+    from colossalai.booster.mixed_precision import FP16TorchMixedPrecision
+    from colossalai.booster.plugin import GeminiPlugin, TorchDDPPlugin
+    from tests.kit.numerics.scenarios.independent_impl import check_training
+
+    colossalai.launch(rank=rank, world_size=world_size, host="localhost", port=port)
+    if backend == "ddp":
+        plugin, mp = TorchDDPPlugin(), FP16TorchMixedPrecision(init_scale=1024)
+    else:
+        plugin, mp = GeminiPlugin(precision="fp16", initial_scale=1024, enable_gradient_accumulation=True), None
+    check_training("transformers_qwen3_5_2b_tiny_fused", plugin, mp, steps=3).assert_pass()
+
+
+@pytest.mark.parametrize("backend", ["ddp", "gemini"])
+def test_fp16_training_alignment(backend):
+    from colossalai.testing import spawn
+
+    spawn(_check_fp16_training, 1, backend=backend)
