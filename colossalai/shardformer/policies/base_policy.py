@@ -33,6 +33,8 @@ class SubModuleReplacementDescription:
     target_module: Union[ParallelModule, BaseLayerNorm]
     kwargs: Dict[str, Any] = None
     ignore_if_not_exist: bool = False
+    # Reuse only targets whose existing configuration matches this replacement.
+    can_reuse: Optional[Callable[[Module], bool]] = None
 
 
 @dataclass

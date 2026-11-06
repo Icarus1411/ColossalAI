@@ -85,11 +85,12 @@ class TorchAMPModule(ModelWrapper):
         module (nn.Module): Module to wrap.
     """
 
-    def __init__(self, module: nn.Module):
+    def __init__(self, module: nn.Module, dtype: torch.dtype = torch.float16):
         super().__init__(module)
+        self.dtype = dtype
 
     def forward(self, *args, **kwargs):
-        with get_accelerator().autocast():
+        with get_accelerator().autocast(dtype=self.dtype):
             return self.module(*args, **kwargs)
 
 
@@ -132,6 +133,10 @@ class FP16TorchMixedPrecision(MixedPrecision):
     ) -> Tuple[nn.Module, OptimizerWrapper, Callable]:
         model = TorchAMPModule(model)
         if optimizer is not None:
+            # DDP supplies a plain forwarding wrapper. Keep the AMP wrapper
+            # directly around the torch optimizer for scaler and checkpoint I/O.
+            if type(optimizer) is OptimizerWrapper:
+                optimizer = optimizer.unwrap()
             optimizer = TorchAMPOptimizer(optimizer, **self.torch_amp_kwargs)
         if criterion is not None:
             criterion = TorchAMPModule(criterion)

@@ -537,7 +537,21 @@ class TorchFSDPPlugin(DPPluginBase):
         lr_scheduler: Optional[LRScheduler] = None,
     ) -> Tuple[nn.Module, OptimizerWrapper, Callable, DataLoader, LRScheduler]:
         # wrap the model with PyTorch FSDP
-        fsdp_model = TorchFSDPModel(model, device_id=torch.cuda.current_device(), **self.fsdp_kwargs)
+        options = dict(self.fsdp_kwargs)
+        if options["auto_wrap_policy"] is None and options["ignored_modules"] is None:
+            # Model policies may isolate a frozen tower in its own flat parameter.
+            # Respect explicit user wrapping and keep the default for all other models.
+            towers = {
+                module for module in model.modules()
+                if getattr(module, "_colossalai_fsdp_frozen_tower", False)
+                and all(not p.requires_grad for p in module.parameters())
+            }
+            if towers:
+                from functools import partial
+                from torch.distributed.fsdp.wrap import lambda_auto_wrap_policy
+
+                options["auto_wrap_policy"] = partial(lambda_auto_wrap_policy, lambda_fn=towers.__contains__)
+        fsdp_model = TorchFSDPModel(model, device_id=torch.cuda.current_device(), **options)
 
         if self.fp8_communication:
             from colossalai.quantization.utils import patch_fsdp_params_comm_hook

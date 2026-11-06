@@ -82,6 +82,18 @@ def test_reject_unsupported_inputs_and_configuration():
         ShardFormer(ShardConfig(enable_tensor_parallelism=False, enable_flash_attention=True)).optimize(build_model())
 
 
+def test_reapply_text_policy_preserves_fused_modules():
+    model = build_model(conditional=True, fused=True).cuda()
+    layers = [m for m in model.modules() if isinstance(m, FusedGatedDeltaNet)]
+    assert len(layers) == 3
+    sharder = ShardFormer(ShardConfig(enable_tensor_parallelism=False))
+    model, _ = sharder.optimize(model)
+    assert layers == [m for m in model.modules() if isinstance(m, FusedGatedDeltaNet)]
+    layers[0].force_fp32_core = False
+    with pytest.raises(AssertionError, match="has been replaced"):
+        sharder.optimize(model)
+
+
 def test_stable_backward_with_colo_tensor():
     from colossalai.shardformer.layer import fused_gated_delta_rule
     from colossalai.tensor.colo_tensor import ColoTensor

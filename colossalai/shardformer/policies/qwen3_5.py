@@ -1,6 +1,7 @@
 """Qwen3.5 dense, full-sequence text training with Gated DeltaNet at TP=1."""
 
 import inspect
+from operator import attrgetter
 from functools import wraps
 
 from colossalai.shardformer.layer import FusedGatedDeltaNet
@@ -60,6 +61,7 @@ class Qwen3_5Policy(Policy):
         for module in self.model.modules():
             if isinstance(module, Qwen3_5VisionModel):
                 module.requires_grad_(False)
+                module._colossalai_fsdp_frozen_tower = True
         return self.model
 
     def module_policy(self):
@@ -75,7 +77,8 @@ class Qwen3_5Policy(Policy):
             Qwen3_5DecoderLayer: ModulePolicyDescription(
                 sub_module_replacement=[
                     SubModuleReplacementDescription("linear_attn", FusedGatedDeltaNet,
-                                                    kwargs={"force_fp32_core": True}, ignore_if_not_exist=True)
+                                                    kwargs={"force_fp32_core": True}, ignore_if_not_exist=True,
+                                                    can_reuse=attrgetter("force_fp32_core"))
                 ]
             )
         }

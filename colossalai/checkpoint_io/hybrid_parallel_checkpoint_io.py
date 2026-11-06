@@ -235,6 +235,8 @@ class HybridParallelCheckpointIO(GeneralCheckpointIO):
                 if param_id not in pinned_state_dicts:
                     pinned_state_dicts[param_id] = {}
             original_shape = param_info["param2shape"][id(working_param)]
+            if master_to_working_map is not None and param.dtype != working_param.dtype:
+                state = {**state, "_colossalai_master_param": param.detach()}
             state_ = HybridParallelCheckpointIO.gather_from_sharded_optimizer_state(
                 state,
                 working_param,
@@ -810,6 +812,10 @@ class HybridParallelCheckpointIO(GeneralCheckpointIO):
                     dtype=dtype,
                     inplace=True,
                 )
+                master = new_states[param].pop("_colossalai_master_param", None)
+                if master is not None:
+                    with torch.no_grad():
+                        param.copy_(master.view_as(param))
         optimizer.optim.state.update(new_states)
 
     def save_unsharded_model(
@@ -947,6 +953,8 @@ class HybridParallelCheckpointIO(GeneralCheckpointIO):
             param_id = optimizer.param_info["param2id"][id(working_param)]
             original_shape = optimizer.param_info["param2shape"][id(working_param)]
 
+            if master_to_working_map is not None and param.dtype != working_param.dtype:
+                state = {**state, "_colossalai_master_param": param.detach()}
             local_states[param_id] = HybridParallelCheckpointIO.gather_from_sharded_optimizer_state(
                 state,
                 working_param,

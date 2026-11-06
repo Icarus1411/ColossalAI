@@ -205,9 +205,10 @@ class ModelSharder(object):
             if (include is not None) and (native_sub_module is not None) and (native_sub_module not in include):
                 continue
 
-            assert not isinstance(
-                native_sub_module, target_module
-            ), f"The module with suffix {suffix} has been replaced, please check the policy"
+            if isinstance(native_sub_module, target_module):
+                if description.can_reuse is not None and description.can_reuse(native_sub_module):
+                    continue
+                raise AssertionError(f"The module with suffix {suffix} has been replaced, please check the policy")
 
             # if it is None and we are allowed to ignore this module
             # just skip
