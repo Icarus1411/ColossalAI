@@ -13,7 +13,7 @@ from transformers import AutoTokenizer, Qwen3_5ForConditionalGeneration
 import colossalai
 from colossalai.testing import spawn
 from tests.kit.model_zoo.registry import ModelAttribute
-from tests.kit.model_zoo.transformers.qwen3_5 import outputs, loss_fn, prepare_text
+from tests.kit.model_zoo.transformers.qwen3_5 import outputs, loss_fn, prepare_text, causal_labels
 from tests.kit.model_zoo.transformers.qwen3_5_reference import native_reference
 from tests.kit.numerics import NumericsSpec
 from tests.kit.numerics.acceptance import CONFIGS
@@ -33,7 +33,7 @@ def data_fn(snapshot):
                        "Write a short Python function that adds two numbers. " * 4],
                       padding="max_length", truncation=True, max_length=65, return_tensors="pt")
     batch = {k: v for k, v in batch.items() if k in ("input_ids", "attention_mask")}
-    batch["labels"] = batch["input_ids"].masked_fill(batch["attention_mask"] == 0, -100)
+    batch["labels"] = causal_labels(batch["input_ids"], batch["attention_mask"])
     return batch
 
 

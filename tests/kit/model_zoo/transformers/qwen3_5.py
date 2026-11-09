@@ -58,6 +58,15 @@ def build_model(value_heads=2, conditional=False, fused=False, hidden_size=64):
     return model
 
 
+def causal_labels(input_ids, attention_mask):
+    """Ignore causal targets when either token in the prediction pair is padding."""
+    labels = input_ids.masked_fill(attention_mask == 0, -100)
+    # HF shifts labels left inside the causal loss. A left-padding boundary must
+    # not train the last padding position to predict the first real token.
+    labels[:, 1:].masked_fill_(attention_mask[:, :-1] == 0, -100)
+    return labels
+
+
 def data_gen():
     ids = torch.randint(1, 250, (2, 65))
     mask = torch.ones_like(ids)
@@ -66,7 +75,7 @@ def data_gen():
     mask[0, :left] = 0
     mask[1, -right:] = 0
     ids = ids.masked_fill(mask == 0, 0)
-    labels = ids.masked_fill(mask == 0, -100)
+    labels = causal_labels(ids, mask)
     return {"input_ids": ids, "attention_mask": mask, "labels": labels}
 
 
