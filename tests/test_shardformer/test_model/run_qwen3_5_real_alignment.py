@@ -44,8 +44,12 @@ def worker(rank, world_size, port, snapshot, config, out, steps):
     recipe = CONFIGS[config]
     intra = importlib.import_module("fla.ops.gated_delta_rule.chunk_fwd")
     stable = importlib.import_module("colossalai.shardformer.layer._gated_delta_net_fp32")
-    with patch.object(intra, "chunk_scaled_dot_kkt_fwd", wraps=intra.chunk_scaled_dot_kkt_fwd) as fwd, \
-            patch.object(stable, "stable_chunk_bwd_dqkwg", wraps=stable.stable_chunk_bwd_dqkwg) as bwd:
+    forward, backward = (intra, "chunk_scaled_dot_kkt_fwd"), (stable, "stable_chunk_bwd_dqkwg")
+    if config == "shardformer_bf16":
+        aligned = importlib.import_module("colossalai.shardformer.layer._gated_delta_net_fp16")
+        forward, backward = (aligned._block_scores_kernel, "run"), (aligned._block_scores_bwd_kernel, "run")
+    with patch.object(forward[0], forward[1], wraps=getattr(*forward)) as fwd, \
+            patch.object(backward[0], backward[1], wraps=getattr(*backward)) as bwd:
         report = check_training(entry, recipe.plugin_fn(), recipe.mixed_precision, steps=steps)
     payload = {"snapshot": snapshot, "config": config, "steps": steps, "passed": report.passed,
                "fused_forward_calls": fwd.call_count, "fused_backward_calls": bwd.call_count,

@@ -88,7 +88,11 @@ def test_text_policy(conditional, checkpoint, dtype):
                 "stable_chunk_bwd_dqkwg")
     optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=1e-4)
     before = model.lm_head.weight.detach().clone()
-    with patch.object(intra, "chunk_scaled_dot_kkt_fwd", wraps=intra.chunk_scaled_dot_kkt_fwd) as fwd, \
+    forward = (intra, "chunk_scaled_dot_kkt_fwd")
+    if dtype == torch.bfloat16:
+        aligned = importlib.import_module("colossalai.shardformer.layer._gated_delta_net_fp16")
+        forward, backward = (aligned._block_scores_kernel, "run"), (aligned._block_scores_bwd_kernel, "run")
+    with patch.object(forward[0], forward[1], wraps=getattr(*forward)) as fwd, \
             patch.object(backward[0], backward[1], wraps=getattr(*backward)) as bwd:
         result = model(**batch)
         assert torch.isfinite(result.loss)
@@ -217,3 +221,23 @@ def test_fp16_training_alignment(backend, entry):
     from colossalai.testing import spawn
 
     spawn(_check_fp16_training, 1, backend=backend, entry=entry)
+
+
+def _check_bf16_training(rank, world_size, port, config):
+    import colossalai
+    from tests.kit.numerics.acceptance import CONFIGS
+    from tests.kit.numerics.scenarios.independent_impl import check_training
+
+    colossalai.launch(rank=rank, world_size=world_size, host="localhost", port=port)
+    recipe = CONFIGS[config]
+    check_training("transformers_qwen3_5_2b_tiny_fused", recipe.plugin_fn(), recipe.mixed_precision, steps=3).assert_pass()
+    torch.distributed.destroy_process_group()
+
+
+@pytest.mark.parametrize("config", [
+    "zero1_bf16", "zero2_bf16", "zero2_bf16_offload", "shardformer_bf16", "gemini_bf16", "fsdp_bf16",
+])
+def test_bf16_training_alignment(config):
+    from colossalai.testing import spawn
+
+    spawn(_check_bf16_training, 1, config=config)

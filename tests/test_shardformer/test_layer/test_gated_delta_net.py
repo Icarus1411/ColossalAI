@@ -32,7 +32,7 @@ def strict_triton_precision(request):
     # Set this before the first FP32 FLA JIT in this isolated test module.
     # Torch's full_precision_matmul does not control Triton dot precision.
     spec = getattr(request.node, "callspec", None)
-    if spec is not None and spec.params.get("dtype") == torch.float32:
+    if spec is not None and spec.params.get("dtype") in (torch.float32, torch.bfloat16):
         with patch.dict(os.environ, {"TRITON_F32_DEFAULT": "ieee"}):
             yield
     else:
@@ -334,6 +334,7 @@ def test_shardformer_replacement(kernel_calls):
 
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("autocast", [False, True])
 @pytest.mark.parametrize("length,key_dim,value_dim,decay", [
     (1, 32, 64, 1.0),
@@ -344,7 +345,7 @@ def test_shardformer_replacement(kernel_calls):
     (129, 128, 128, 0.01),
     (512, 128, 128, 0.1),
 ])
-def test_qwen_fp16_core_alignment(autocast, length, key_dim, value_dim, decay):
+def test_qwen_low_precision_core_alignment(dtype, autocast, length, key_dim, value_dim, decay):
     from colossalai.shardformer.layer import _gated_delta_net_fp16 as fp16
 
     torch.manual_seed(17)
@@ -358,21 +359,23 @@ def test_qwen_fp16_core_alignment(autocast, length, key_dim, value_dim, decay):
     }
 
     def candidate(q, k, v, g, beta):
-        with torch.autocast("cuda", dtype=torch.float16, enabled=autocast):
+        with torch.autocast("cuda", dtype=dtype, enabled=autocast):
+            if dtype == torch.bfloat16:
+                return fused_gated_delta_rule(q.float(), k.float(), v.float(), g.float(), beta.float(), align_bf16_blocks=True).to(dtype)
             return fused_gated_delta_rule(q, k, v, g.float(), beta, align_fp16_blocks=True)
 
     with native_hf() as hf:
         def reference(q, k, v, g, beta):
             if q.dtype == torch.float64:
                 return recurrence(q, k, v, g, beta)
-            with torch.autocast("cuda", dtype=torch.float16, enabled=autocast):
+            with torch.autocast("cuda", dtype=dtype, enabled=autocast):
                 return hf.torch_chunk_gated_delta_rule(
                     q, k, v, g.float(), beta, use_qk_l2norm_in_kernel=True,
                 )[0]
 
         traces = check_alignment(
-            candidate, reference, inputs, torch.float16,
-            f"qwen-fp16-{autocast}-{length}-{key_dim}-{value_dim}-{decay}",
+            candidate, reference, inputs, dtype,
+            f"qwen-{str(dtype).split('.')[-1]}-{autocast}-{length}-{key_dim}-{value_dim}-{decay}",
             {"out", *(f"grad/{name}" for name in inputs)},
             kernel_targets=[
                 (fp16._block_scores_kernel, "run"),
@@ -382,7 +385,8 @@ def test_qwen_fp16_core_alignment(autocast, length, key_dim, value_dim, decay):
     assert torch.count_nonzero(traces["test"]["grad/g"][:, 0]) == 0
 
 
-def test_qwen_fp16_alignment_rejects_native_fallback():
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_qwen_low_precision_alignment_rejects_native_fallback(dtype):
     from colossalai.shardformer.layer import _gated_delta_net_fp16 as fp16
 
     torch.manual_seed(17)
@@ -398,7 +402,7 @@ def test_qwen_fp16_alignment_rejects_native_fallback():
             )[0]
 
         report = independent_impl.check_fwd_bwd(
-            reference, reference, inputs, torch.float16,
+            reference, reference, inputs, dtype,
             expect_calls=[(fp16._block_scores_kernel, "run"), (fp16._block_scores_bwd_kernel, "run")],
         )
     calls = [entry for entry in report.entries if entry.name.startswith("<called>/")]

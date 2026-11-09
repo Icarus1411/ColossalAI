@@ -58,3 +58,22 @@ head dim64/128、弱衰减；完整层 hidden_size64、长度65、key heads16、
 尚未测吞吐、显存收益或收敛；稳定反向新增计算的性能成本需要单独评估。
 本地适配器依赖 FLA 0.6.0 内部接口，升级前需复核并重跑矩阵。
 2B1 CI 镜像和原 setuptools 冲突仍为独立待办；本轮不向 shared-results/numerics/ 发布整模型报告。
+
+## Qwen3.5 策略的低精度路径
+
+上文默认共享层的 FLA 调度与 Qwen3.5 策略启用的 `force_fp32_core` 路径不同。
+Qwen 的 FP16 和提升到 FP32 后计算的 BF16 使用 64-token 分块，保留 HF 的归一化、
+自然对数 gate 前缀和矩阵乘法舍入边界。`_gated_delta_net_fp16.py` 中的对齐核心同时服务这两种输入；
+它保留输入 dtype，BF16 的最终转换在层边界完成。FP32 的稳定 FLA 路径保持原样。
+
+BF16 原有 16-token 前向和反向重建在修正左 padding 标签后的 2B 训练上暴露了舍入差异：
+门控梯度、层归一化权重及后续 loss 超过参考误差预算。原生核心和 64-token 对齐核心均可消除
+所定位的失败，单独恢复首 gate 的值不能消除。生产路径仍调用本地 Triton 前向/反向核，未使用 HF 回退。
+
+`test_qwen_low_precision_core_alignment` 覆盖 FP16/BF16、显式精度和 autocast、
+分块边界及弱衰减，并通过统一 `check_fwd_bwd` 断言 `_block_scores_kernel.run` 和
+`_block_scores_bwd_kernel.run` 实际执行。负例拒绝原生回退。
+`test_bf16_training_alignment` 覆盖六种 BF16 训练配置，保留统一工具的默认判分。
+
+Qwen 评测数据的因果标签要求预测位置和目标位置都有效：左 padding 的最后一格不能被用来
+预测第一个有效 token。真实权重数据准备复用同一规则；回归检查补齐后的 token loss 与未补齐序列等价。

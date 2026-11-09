@@ -57,8 +57,8 @@ def fused_gated_delta_rule(q, k, v, g, beta, *, align_bf16_blocks=False, align_f
         raise ValueError("Expected a nonempty sequence and g/beta [B,T,H]")
     if align_bf16_blocks and q.dtype != torch.float32:
         raise ValueError("BF16-aligned blocks require Q/K/V promoted to FP32")
-    if align_fp16_blocks:
-        if q.dtype != torch.float16:
+    if align_fp16_blocks or align_bf16_blocks:
+        if align_fp16_blocks and q.dtype != torch.float16:
             raise ValueError("FP16-aligned blocks require FP16 Q/K/V")
         from ._gated_delta_net_fp16 import qwen_fp16_gated_delta_rule
 

@@ -1,4 +1,4 @@
-"""Qwen FP16 GDN blocks with explicit AMP rounding at matrix-product boundaries."""
+"""Qwen low-precision GDN blocks with AMP rounding at matrix-product boundaries."""
 
 import torch
 import torch.nn.functional as F
@@ -98,7 +98,12 @@ def _normalize(x):
 
 
 def qwen_fp16_gated_delta_rule(q, k, v, g, beta):
-    """Compute 64-token WY blocks with FP32 gates and the caller's matmul precision."""
+    """Compute 64-token WY blocks for FP16 or promoted BF16 Qwen inputs.
+
+    Keep the original private entry name for callers of the FP16 path. Promoted
+    BF16 inputs return FP32 here and are cast at the Qwen layer boundary.
+    """
+    output_dtype = q.dtype
     length = q.shape[1]
     size = 64
     # Keep the layout conversion and dtype conversion at the same boundary
@@ -134,4 +139,4 @@ def qwen_fp16_gated_delta_rule(q, k, v, g, beta):
             state = state * retention + write.transpose(-1, -2) @ residual
 
     out = torch.stack(outputs, dim=2).flatten(2, 3)[:, :, :length]
-    return out.transpose(1, 2).to(torch.float16, memory_format=torch.contiguous_format)
+    return out.transpose(1, 2).to(output_dtype, memory_format=torch.contiguous_format)
