@@ -92,7 +92,9 @@ class _BlockScores(torch.autograd.Function):
 
 
 def _normalize(x):
-    return x * torch.rsqrt(x.square().sum(dim=-1, keepdim=True) + 1e-6)
+    # Preserve the two multiplication branches in HF's normalization backward.
+    # square() reassociates their derivative and can round small FP16 updates differently.
+    return x * torch.rsqrt((x * x).sum(dim=-1, keepdim=True) + 1e-6)
 
 
 def qwen_fp16_gated_delta_rule(q, k, v, g, beta):

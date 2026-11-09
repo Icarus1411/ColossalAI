@@ -272,7 +272,7 @@ def test_unified_entry_rejects_unfused_path():
     # contract. Exercise the official assertion rather than our own counter.
     for dtype in (torch.bfloat16, torch.float32):
         report = independent_impl.check_fwd_bwd(
-            recurrence, recurrence, inputs, dtype, expect_calls=expected_kernel_calls(dtype) if kernel_targets is None else kernel_targets,
+            recurrence, recurrence, inputs, dtype, expect_calls=expected_kernel_calls(dtype),
         )
         called = [entry for entry in report.entries if entry.name.startswith("<called>/")]
         assert len(called) == 2 and all(not entry.passed for entry in called)

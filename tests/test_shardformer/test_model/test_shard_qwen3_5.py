@@ -137,7 +137,7 @@ def test_promoted_bf16_blocks_against_fp64(length, dim):
     assert torch.count_nonzero(actual[4][:, 0]) == 0
 
 
-def _check_fp16_training(rank, world_size, port, backend):
+def _check_fp16_training(rank, world_size, port, backend, entry):
     import colossalai
     from colossalai.booster.mixed_precision import FP16TorchMixedPrecision
     from colossalai.booster.plugin import GeminiPlugin, TorchDDPPlugin
@@ -148,11 +148,15 @@ def _check_fp16_training(rank, world_size, port, backend):
         plugin, mp = TorchDDPPlugin(), FP16TorchMixedPrecision(init_scale=1024)
     else:
         plugin, mp = GeminiPlugin(precision="fp16", initial_scale=1024, enable_gradient_accumulation=True), None
-    check_training("transformers_qwen3_5_2b_tiny_fused", plugin, mp, steps=3).assert_pass()
+    check_training(entry, plugin, mp, steps=3).assert_pass()
 
 
-@pytest.mark.parametrize("backend", ["ddp", "gemini"])
-def test_fp16_training_alignment(backend):
+@pytest.mark.parametrize("entry,backend", [
+    ("transformers_qwen3_5_0_8b_tiny_conditional_fused", "ddp"),
+    ("transformers_qwen3_5_2b_tiny_fused", "ddp"),
+    ("transformers_qwen3_5_2b_tiny_fused", "gemini"),
+])
+def test_fp16_training_alignment(backend, entry):
     from colossalai.testing import spawn
 
-    spawn(_check_fp16_training, 1, backend=backend)
+    spawn(_check_fp16_training, 1, backend=backend, entry=entry)
