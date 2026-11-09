@@ -103,7 +103,7 @@ def expected_kernel_calls(dtype):
     return [(kernel, "chunk_gated_delta_rule_fwd"), backward]
 
 
-def check_alignment(test_fn, ref_fn, inputs, dtype, case, expected):
+def check_alignment(test_fn, ref_fn, inputs, dtype, case, expected, kernel_targets=None):
     traces = {}
     original_capture = independent_impl.run_fwd_bwd
 
@@ -117,14 +117,14 @@ def check_alignment(test_fn, ref_fn, inputs, dtype, case, expected):
     with patch.object(independent_impl, "run_fwd_bwd", record_capture):
         report = independent_impl.check_fwd_bwd(
             test_fn, ref_fn, inputs, dtype,
-            expect_calls=expected_kernel_calls(dtype),
+            expect_calls=expected_kernel_calls(dtype) if kernel_targets is None else kernel_targets,
         )  # No judge_kwargs: use the official defaults, including RMS-scaled tol.
 
     if os.environ.get("GDN_TEST_LOG_DIR"):
         directory = Path(os.environ["GDN_TEST_LOG_DIR"])
         directory.mkdir(parents=True, exist_ok=True)
         payload = {
-            "scope": "2B2 operator/module only; not a whole-model L2 acceptance report",
+            "scope": "GDN operator/module acceptance; not a whole-model L2 report",
             "entrypoint": "tests.kit.numerics.scenarios.independent_impl.check_fwd_bwd",
             "case": case, "dtype": str(dtype), "grad_seed": 0,
             "repository_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
@@ -272,7 +272,7 @@ def test_unified_entry_rejects_unfused_path():
     # contract. Exercise the official assertion rather than our own counter.
     for dtype in (torch.bfloat16, torch.float32):
         report = independent_impl.check_fwd_bwd(
-            recurrence, recurrence, inputs, dtype, expect_calls=expected_kernel_calls(dtype),
+            recurrence, recurrence, inputs, dtype, expect_calls=expected_kernel_calls(dtype) if kernel_targets is None else kernel_targets,
         )
         called = [entry for entry in report.entries if entry.name.startswith("<called>/")]
         assert len(called) == 2 and all(not entry.passed for entry in called)
@@ -331,3 +331,77 @@ def test_shardformer_replacement(kernel_calls):
     with torch.autocast("cuda", dtype=torch.bfloat16):
         model(torch.randn(1, 17, 64, device="cuda")).float().square().mean().backward()
     assert kernel_calls == {"forward": 1, "backward": 1}
+
+
+
+@pytest.mark.parametrize("autocast", [False, True])
+@pytest.mark.parametrize("length,key_dim,value_dim,decay", [
+    (1, 32, 64, 1.0),
+    (63, 64, 32, 1.0),
+    (64, 64, 64, 1.0),
+    (65, 128, 128, 1.0),
+    (129, 73, 40, 1.0),
+    (129, 128, 128, 0.01),
+    (512, 128, 128, 0.1),
+])
+def test_qwen_fp16_core_alignment(autocast, length, key_dim, value_dim, decay):
+    from colossalai.shardformer.layer import _gated_delta_net_fp16 as fp16
+
+    torch.manual_seed(17)
+    shape = (2, length, 2)
+    inputs = {
+        "q": torch.randn(*shape, key_dim, device="cuda"),
+        "k": torch.randn(*shape, key_dim, device="cuda"),
+        "v": torch.randn(*shape, value_dim, device="cuda"),
+        "g": -decay * F.softplus(torch.randn(shape, device="cuda")),
+        "beta": torch.rand(shape, device="cuda"),
+    }
+
+    def candidate(q, k, v, g, beta):
+        with torch.autocast("cuda", dtype=torch.float16, enabled=autocast):
+            return fused_gated_delta_rule(q, k, v, g.float(), beta, align_fp16_blocks=True)
+
+    with native_hf() as hf:
+        def reference(q, k, v, g, beta):
+            if q.dtype == torch.float64:
+                return recurrence(q, k, v, g, beta)
+            with torch.autocast("cuda", dtype=torch.float16, enabled=autocast):
+                return hf.torch_chunk_gated_delta_rule(
+                    q, k, v, g.float(), beta, use_qk_l2norm_in_kernel=True,
+                )[0]
+
+        traces = check_alignment(
+            candidate, reference, inputs, torch.float16,
+            f"qwen-fp16-{autocast}-{length}-{key_dim}-{value_dim}-{decay}",
+            {"out", *(f"grad/{name}" for name in inputs)},
+            kernel_targets=[
+                (fp16._block_scores_kernel, "run"),
+                (fp16._block_scores_bwd_kernel, "run"),
+            ],
+        )
+    assert torch.count_nonzero(traces["test"]["grad/g"][:, 0]) == 0
+
+
+def test_qwen_fp16_alignment_rejects_native_fallback():
+    from colossalai.shardformer.layer import _gated_delta_net_fp16 as fp16
+
+    torch.manual_seed(17)
+    shape = (1, 17, 2, 64)
+    inputs = {name: torch.randn(shape, device="cuda") for name in ("q", "k", "v")}
+    inputs.update(g=-torch.rand(shape[:3], device="cuda"), beta=torch.rand(shape[:3], device="cuda"))
+    with native_hf() as hf:
+        def reference(q, k, v, g, beta):
+            if q.dtype == torch.float64:
+                return recurrence(q, k, v, g, beta)
+            return hf.torch_chunk_gated_delta_rule(
+                q, k, v, g.float(), beta, use_qk_l2norm_in_kernel=True,
+            )[0]
+
+        report = independent_impl.check_fwd_bwd(
+            reference, reference, inputs, torch.float16,
+            expect_calls=[(fp16._block_scores_kernel, "run"), (fp16._block_scores_bwd_kernel, "run")],
+        )
+    calls = [entry for entry in report.entries if entry.name.startswith("<called>/")]
+    assert len(calls) == 2
+    assert all(not entry.passed and entry.reason == "never called" for entry in calls)
+    assert not report.passed
