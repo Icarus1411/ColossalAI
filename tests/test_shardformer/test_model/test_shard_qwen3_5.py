@@ -157,7 +157,7 @@ def test_stable_backward_with_colo_tensor():
 
 
 @pytest.mark.parametrize("length,dim", [(1, 32), (17, 64), (65, 128)])
-def test_promoted_bf16_blocks_against_fp64(length, dim):
+def test_fp32_core_with_bf16_quantized_inputs(length, dim):
     from colossalai.shardformer.layer import fused_gated_delta_rule
     from tests.kit.model_zoo.transformers.qwen3_5_reference import recurrence
     from tests.kit.numerics.capture.utils import full_precision_matmul
@@ -170,7 +170,7 @@ def test_promoted_bf16_blocks_against_fp64(length, dim):
 
     def evaluate(reference):
         inputs = [(x.double() if reference else x).detach().requires_grad_() for x in values]
-        out = recurrence(*inputs) if reference else fused_gated_delta_rule(*inputs, align_bf16_blocks=True)
+        out = recurrence(*inputs) if reference else fused_gated_delta_rule(*inputs)
         return (out, *torch.autograd.grad(out, inputs, upstream.to(out)))
 
     with full_precision_matmul():

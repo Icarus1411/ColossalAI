@@ -40,12 +40,12 @@ def fused_gated_delta_rule(q, k, v, g, beta, *, align_bf16_blocks=False, align_f
     Q/K/V use FP32, BF16 or FP16 on CUDA; gates are accumulated in FP32. Q/K are
     L2-normalized inside the core. No native fallback or inference-only recurrent
     dispatch is allowed, including for a one-token training sequence. The Qwen
-    policy uses align_bf16_blocks on promoted BF16, and align_fp16_blocks
+    policy uses align_bf16_blocks on BF16 inputs, and align_fp16_blocks
     on FP16 inputs to preserve AMP rounding within the chunk.
     """
     if q.device.type != "cuda" or q.dtype not in (torch.float32, torch.bfloat16, torch.float16):
         raise ValueError("FLA training requires CUDA FP32/BF16/FP16 Q/K/V")
-    if q.dtype == torch.float32 and os.environ.get("TRITON_F32_DEFAULT") != "ieee":
+    if (q.dtype == torch.float32 or align_bf16_blocks) and os.environ.get("TRITON_F32_DEFAULT") != "ieee":
         raise ValueError(
             "FP32 GDN requires TRITON_F32_DEFAULT=ieee before starting Python; Torch TF32 flags do not suffice"
         )
@@ -55,8 +55,8 @@ def fused_gated_delta_rule(q, k, v, g, beta, *, align_bf16_blocks=False, align_f
         raise ValueError("Expected Q/K [B,T,H,K] and V [B,T,H,V]; expand grouped Q/K heads first")
     if q.shape[1] == 0 or g.shape != q.shape[:3] or beta.shape != q.shape[:3]:
         raise ValueError("Expected a nonempty sequence and g/beta [B,T,H]")
-    if align_bf16_blocks and q.dtype != torch.float32:
-        raise ValueError("BF16-aligned blocks require Q/K/V promoted to FP32")
+    if align_bf16_blocks and q.dtype != torch.bfloat16:
+        raise ValueError("BF16-aligned blocks require BF16 Q/K/V; promotion belongs inside the core")
     if align_fp16_blocks or align_bf16_blocks:
         if align_fp16_blocks and q.dtype != torch.float16:
             raise ValueError("FP16-aligned blocks require FP16 Q/K/V")
@@ -151,14 +151,13 @@ class FusedGatedDeltaNet(ParallelModule):
         g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
         if self.force_fp32_core and q.dtype == torch.float16:
             output = fused_gated_delta_rule(q, k, v, g, beta, align_fp16_blocks=True)
+        elif self.force_fp32_core and q.dtype == torch.bfloat16:
+            # Convert after transposing inside the core, as HF does. Promoting
+            # here makes the later Tensor.to() a no-op and leaves BHTD strided;
+            # subsequent FP32 kernels then use a different layout and rounding path.
+            output = fused_gated_delta_rule(q, k, v, g, beta, align_bf16_blocks=True)
         elif self.force_fp32_core:
-            # HF Qwen3.5's native core promotes Q/K/V and beta before L2
-            # normalization and the recurrence. Match that precision recipe;
-            # projections, convolution and the returned activations stay in
-            # the model's dtype. The actual core is still fused Triton/FLA.
-            output = fused_gated_delta_rule(
-                q.float(), k.float(), v.float(), g, beta.float(), align_bf16_blocks=q.dtype == torch.bfloat16,
-            ).to(q.dtype)
+            output = fused_gated_delta_rule(q.float(), k.float(), v.float(), g, beta.float()).to(q.dtype)
         else:
             output = fused_gated_delta_rule(q, k, v, g, beta)
         output = self.norm(output.reshape(-1, self.head_v_dim), z)

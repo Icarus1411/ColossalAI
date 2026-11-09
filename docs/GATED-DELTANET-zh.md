@@ -62,9 +62,9 @@ head dim64/128、弱衰减；完整层 hidden_size64、长度65、key heads16、
 ## Qwen3.5 策略的低精度路径
 
 上文默认共享层的 FLA 调度与 Qwen3.5 策略启用的 `force_fp32_core` 路径不同。
-Qwen 的 FP16 和提升到 FP32 后计算的 BF16 使用 64-token 分块，保留 HF 的归一化、
+Qwen 的 FP16 和 BF16 在核心内部提升到 FP32 计算，使用 64-token 分块，保留 HF 的归一化、
 自然对数 gate 前缀和矩阵乘法舍入边界。`_gated_delta_net_fp16.py` 中的对齐核心同时服务这两种输入；
-它保留输入 dtype，BF16 的最终转换在层边界完成。FP32 的稳定 FLA 路径保持原样。
+它在转置之后转换精度，保持 HF 的连续布局及后续浮点运算的舍入路径，并在核心出口恢复输入 dtype。不要在层入口提前转 FP32：同 dtype 的 Tensor.to() 可能直接返回原张量，从而保留不同的步长。FP32 的稳定 FLA 路径保持原样。
 
 BF16 原有 16-token 前向和反向重建在修正左 padding 标签后的 2B 训练上暴露了舍入差异：
 门控梯度、层归一化权重及后续 loss 超过参考误差预算。原生核心和 64-token 对齐核心均可消除
@@ -77,3 +77,5 @@ BF16 原有 16-token 前向和反向重建在修正左 padding 标签后的 2B �
 
 Qwen 评测数据的因果标签要求预测位置和目标位置都有效：左 padding 的最后一格不能被用来
 预测第一个有效 token。真实权重数据准备复用同一规则；回归检查补齐后的 token loss 与未补齐序列等价。
+
+`test_qwen_low_precision_layer_alignment` 额外覆盖两种低精度下 16/32/48 value heads、真实投影布局及左右 padding 的整层前后向，防止仅测独立核心遗漏入口精度转换问题。

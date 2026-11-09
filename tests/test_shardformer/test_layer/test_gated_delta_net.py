@@ -256,6 +256,11 @@ def test_conversion_and_guards():
     with patch.dict(os.environ, {"TRITON_F32_DEFAULT": "tf32"}):
         with pytest.raises(ValueError, match="TRITON_F32_DEFAULT=ieee"):
             fused(x)
+    with patch.dict(os.environ, {"TRITON_F32_DEFAULT": "ieee"}):
+        q = torch.randn(1, 2, 2, 64, device="cuda")
+        gate = torch.randn(1, 2, 2, device="cuda")
+        with pytest.raises(ValueError, match="promotion belongs inside the core"):
+            fused_gated_delta_rule(q, q, q, gate, gate, align_bf16_blocks=True)
     with pytest.raises(ValueError, match="CUDA FP32/BF16/FP16"):
         fused.cpu()(x.cpu())
     with patch("colossalai.shardformer.layer.gated_delta_net._load_fla_kernel", side_effect=ImportError("missing FLA")):
@@ -361,7 +366,7 @@ def test_qwen_low_precision_core_alignment(dtype, autocast, length, key_dim, val
     def candidate(q, k, v, g, beta):
         with torch.autocast("cuda", dtype=dtype, enabled=autocast):
             if dtype == torch.bfloat16:
-                return fused_gated_delta_rule(q.float(), k.float(), v.float(), g.float(), beta.float(), align_bf16_blocks=True).to(dtype)
+                return fused_gated_delta_rule(q, k, v, g.float(), beta, align_bf16_blocks=True)
             return fused_gated_delta_rule(q, k, v, g.float(), beta, align_fp16_blocks=True)
 
     with native_hf() as hf:
@@ -409,3 +414,25 @@ def test_qwen_low_precision_alignment_rejects_native_fallback(dtype):
     assert len(calls) == 2
     assert all(not entry.passed and entry.reason == "never called" for entry in calls)
     assert not report.passed
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("value_heads", [16, 32, 48])
+def test_qwen_low_precision_layer_alignment(dtype, value_heads):
+    from colossalai.shardformer.layer import _gated_delta_net_fp16 as aligned
+
+    torch.manual_seed(29)
+    native = make_native(value_heads)
+    fused = FusedGatedDeltaNet.from_native_module(copy.deepcopy(native), force_fp32_core=True)
+    reference = copy.deepcopy(native)
+    reference.forward = MethodType(reference_layer_forward, reference)
+    mask = torch.ones(2, 65, device="cuda", dtype=torch.bool)
+    mask[0, :7], mask[1, -9:] = False, False
+    inputs = {"hidden_states": torch.randn(2, 65, 64, device="cuda"), "attention_mask": mask}
+    expected = {"out", "grad/hidden_states", *(f"grad/param/{name}" for name, _ in native.named_parameters())}
+    with native_hf():
+        traces = check_alignment(
+            fused, reference, inputs, dtype, f"qwen-layer-{dtype}-heads{value_heads}", expected,
+            kernel_targets=[(aligned._block_scores_kernel, "run"), (aligned._block_scores_bwd_kernel, "run")],
+        )
+    assert torch.count_nonzero(traces["test"]["grad/hidden_states"][~mask.cpu()]) == 0

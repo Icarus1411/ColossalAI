@@ -98,16 +98,16 @@ def _normalize(x):
 
 
 def qwen_fp16_gated_delta_rule(q, k, v, g, beta):
-    """Compute 64-token WY blocks for FP16 or promoted BF16 Qwen inputs.
+    """Compute 64-token WY blocks for FP16 or BF16 Qwen inputs.
 
-    Keep the original private entry name for callers of the FP16 path. Promoted
-    BF16 inputs return FP32 here and are cast at the Qwen layer boundary.
+    Keep the original private entry name for callers of the FP16 path. Convert
+    to FP32 after the layout change, and return the original activation dtype.
     """
     output_dtype = q.dtype
     length = q.shape[1]
     size = 64
     # Keep the layout conversion and dtype conversion at the same boundary
-    # as the model projections, including the final FP16 output conversion.
+    # as the model projections, including the final low-precision output conversion.
     q, k, v, g, beta = (
         x.transpose(1, 2).to(torch.float32, memory_format=torch.contiguous_format) for x in (q, k, v, g, beta)
     )
