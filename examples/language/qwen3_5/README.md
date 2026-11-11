@@ -8,6 +8,7 @@ Run from the repository root using the existing environment (no extra installs):
 export PYTHONPATH="$PWD" HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false
 export OMP_NUM_THREADS=12 MKL_NUM_THREADS=12 TRITON_F32_DEFAULT=ieee
 RUN=/workspace/ColossalAI/logs/my-machine/my-fresh-run
+mkdir -p "$RUN"
 python examples/language/qwen3_5/prepare_data.py --hub /mnt/beegfs/ColossalAI/shared-cache/hub --out "$RUN/data.pt"
 CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.run --standalone --nproc-per-node=1 examples/language/qwen3_5/train_9b.py \
   --data "$RUN/data.pt" --out "$RUN/smoke" --steps 2 --length 128 --kernel-audit
